@@ -1,0 +1,1 @@
+{"taskId":"ruby-job-1","retryCount":0,"maxRetries":3,"retryAfterHours":0.0,"retryAfterTime":"2026-08-12T15:48:11.816678Z","taskData":"{\"user_id\":\"ruby_master\",\"message\":\"matz\"}","taskType":"test_ruby_job"}

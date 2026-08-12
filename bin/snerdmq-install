@@ -1,0 +1,73 @@
+#!/usr/bin/env ruby
+
+require 'net/http'
+require 'uri'
+require 'fileutils'
+require 'rbconfig'
+
+REPO = "greyhands2/snerdmq"
+VERSION = "v0.1.1"
+
+# Determine OS and Architecture
+host_os = RbConfig::CONFIG['host_os']
+host_cpu = RbConfig::CONFIG['host_cpu']
+
+platform = case host_os
+           when /darwin|mac os/
+             'macos'
+           when /linux/
+             'linux'
+           when /mswin|msys|mingw|cygwin|bccwin|wince|emc/
+             'windows'
+           else
+             puts "[Snerd] Unsupported OS: #{host_os}"
+             exit 1
+           end
+
+architecture = case host_cpu
+               when /x86_64|amd64/
+                 'x64'
+               when /arm64|aarch64/
+                 'arm64'
+               else
+                 puts "[Snerd] Unsupported Architecture: #{host_cpu}"
+                 exit 1
+               end
+
+extension = platform == 'windows' ? '.exe' : ''
+binary_name = "snerdmq-#{platform}-#{architecture}#{extension}"
+
+download_url = "https://github.com/#{REPO}/releases/download/#{VERSION}/#{binary_name}"
+
+# In Ruby, gems are installed in a global read-only directory. 
+# It's best to download the binary into the gem's `bin` directory so it ships alongside the library.
+dest_dir = File.expand_path(__dir__)
+dest_path = File.join(dest_dir, "snerdmq#{extension}")
+
+puts "[Snerd] Downloading pre-compiled engine from GitHub: #{binary_name}..."
+
+uri = URI.parse(download_url)
+response = Net::HTTP.get_response(uri)
+
+if response.is_a?(Net::HTTPRedirection)
+  uri = URI.parse(response['location'])
+  response = Net::HTTP.get_response(uri)
+end
+
+if response.code == '404'
+  puts "\n[Snerd] WARN: Binary not found at #{download_url}"
+  puts "[Snerd] (This is expected if you haven't published a GitHub Release yet)"
+  puts "[Snerd] Please provide binary_path manually when initializing SnerdQueue.\n"
+  exit 0
+elsif response.code != '200'
+  puts "[Snerd] Failed to download binary: HTTP #{response.code}"
+  exit 1
+end
+
+File.open(dest_path, "wb") do |file|
+  file.write(response.body)
+end
+
+FileUtils.chmod(0755, dest_path)
+
+puts "[Snerd] Successfully installed Snerd Engine to #{dest_path}!"
