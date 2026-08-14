@@ -61,17 +61,22 @@ module Snerdmq
       end
     end
 
-    def enqueue(task_id:, task_type:, data:, max_retries: 3, retry_after_hours: 0.0)
+    def enqueue(task_id:, task_type:, data:, max_retries: 3, retry_after_hours: 0.0, rate_limit_group: nil, max_per_minute: nil)
       raise "[Snerd] Cannot enqueue task: Queue is not running. Call start_listening first." if @io.nil? || @shutting_down
       
-      send_message({
+      payload = {
         action: "enqueue",
         task_id: task_id,
         task_type: task_type,
         task_data: data.to_json,
         max_retries: max_retries,
         retry_after_hours: retry_after_hours
-      })
+      }
+
+      payload[:rate_limit_group] = rate_limit_group if rate_limit_group
+      payload[:max_per_minute] = max_per_minute if max_per_minute
+
+      send_message(payload)
     end
 
     def shutdown
