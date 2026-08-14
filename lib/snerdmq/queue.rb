@@ -24,6 +24,8 @@ module Snerdmq
       @shutting_down = false
       @io = nil
       @listener_thread = nil
+      @pending_enqueues = {}
+      @pending_mutex = Mutex.new
     end
 
     def register_handler(task_type, &block)
@@ -61,7 +63,7 @@ module Snerdmq
       end
     end
 
-    def enqueue(task_id:, task_type:, data:, max_retries: 3, retry_after_hours: 0.0, rate_limit_group: nil, max_per_minute: nil)
+    def enqueue(task_id:, task_type:, data:, max_retries: 3, retry_after_hours: 0.0, rate_limit_group: nil, max_per_minute: nil, auto_dedupe: false)
       raise "[Snerd] Cannot enqueue task: Queue is not running. Call start_listening first." if @io.nil? || @shutting_down
       
       payload = {
@@ -75,8 +77,31 @@ module Snerdmq
 
       payload[:rate_limit_group] = rate_limit_group if rate_limit_group
       payload[:max_per_minute] = max_per_minute if max_per_minute
+      payload[:auto_dedupe] = auto_dedupe if auto_dedupe
+
+      cond = ConditionVariable.new
+      result = nil
+      
+      @pending_mutex.synchronize do
+        @pending_enqueues[task_id] = { cond: cond, result: nil }
+      end
 
       send_message(payload)
+
+      @pending_mutex.synchronize do
+        # Wait up to 5 seconds for Ack
+        cond.wait(@pending_mutex, 5.0) if @pending_enqueues[task_id][:result].nil?
+        pending = @pending_enqueues.delete(task_id)
+        result = pending[:result] if pending
+      end
+
+      if result.nil?
+        raise "[Snerd] Timeout waiting for daemon Ack on task #{task_id}"
+      elsif result.is_a?(StandardError)
+        raise result
+      end
+      
+      true
     end
 
     def shutdown
@@ -109,10 +134,31 @@ module Snerdmq
 
         begin
           msg = JSON.parse(line)
+           
           
           if msg["action"] == "execute"
             # Execute in a short-lived thread so we don't block the stdout listener loop
             Thread.new { handle_execute(msg) }
+          elsif msg["action"] == "ack"
+            if msg["task_id"]
+              @pending_mutex.synchronize do
+                if pending = @pending_enqueues[msg["task_id"]]
+                  pending[:result] = true
+                  pending[:cond].signal
+                end
+              end
+            end
+          elsif msg["action"] == "error"
+            if msg["task_id"]
+              @pending_mutex.synchronize do
+                if pending = @pending_enqueues[msg["task_id"]]
+                  pending[:result] = StandardError.new(msg["message"])
+                  pending[:cond].signal
+                end
+              end
+            else
+              warn "[Snerd] Error from engine: #{msg['message']}"
+            end
           elsif msg["action"] == "max_retries_reached"
             warn "[Snerd] Dead Letter Queue: Task #{msg['task_id']} (#{msg['task_type']}) permanently failed."
           end
