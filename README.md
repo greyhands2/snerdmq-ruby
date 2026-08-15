@@ -1,6 +1,6 @@
 <div align="center">
   <img src="./assets/Designer-9.png" height="120" alt="SnerdMQ Ruby Logo" />
-  <h1>💎 SnerdMQ Ruby SDK v0.2.0</h1>
+  <h1>💎 SnerdMQ Ruby SDK v0.2.1</h1>
   <p>A zero-config, C-speed background job queue for Ruby. Ditch Redis and Sidekiq for lightweight, persistent background jobs.</p>
 
   [![Gem Version](https://badge.fury.io/rb/snerdmq.svg)](https://badge.fury.io/rb/snerdmq)
@@ -8,7 +8,7 @@
 
 This is the official Ruby SDK wrapper for **SnerdMQ**. It handles all JSON-RPC communication and `IO.popen` orchestration so you can write lightning-fast background jobs without managing any external databases like Redis or Postgres.
 
-## ✨ v0.2.0 AI-Era Features
+## ✨ v0.2.1 AI-Era Features
 - **Smart API Rate-Limiting**: Natively tracks `rate_limit_group` execution velocity to prevent 429 "Too Many Requests" API errors.
 - **Payload-Hashing Deduplication**: Automatically computes cryptographic hashes to drop duplicate tasks instantly.
 - **Dynamic Float Prioritization**: A native Binary Max-Heap bypasses standard FIFO rules for high urgency tasks.
@@ -16,7 +16,7 @@ This is the official Ruby SDK wrapper for **SnerdMQ**. It handles all JSON-RPC c
 - **Zero Rust Required**: Our gem installation script automatically downloads the pre-compiled C-speed Rust binary for your OS.
 - **Thread Safe**: Uses native Ruby `Thread`s and `Mutex` locks to orchestrate I/O without blocking your main event loop.
 
-### ⚙️ Advanced Task Configuration (v0.2.0)
+### ⚙️ Advanced Task Configuration (v0.2.1)
 To power complex AI workflows, tasks can now be configured with advanced orchestration parameters:
 
 * **`auto_dedupe` (`true/false`)**: If set to `true`, the daemon computes a cryptographic hash of the `task_type` and `data`. If an identical payload is currently sitting in the queue pending execution, this new task is silently dropped. Excellent for preventing duplicate generative AI requests from trigger-happy users!
@@ -65,7 +65,7 @@ end
 queue.start_listening
 puts "SnerdMQ Ruby SDK is listening for jobs..."
 
-# 4. Enqueue a job from anywhere in your codebase (Now with v0.2.0 AI Features!)
+# 4. Enqueue a job from anywhere in your codebase (Now with v0.2.1 AI Features!)
 queue.enqueue(
   task_id: "email-123",
   task_type: "send_email",
@@ -80,6 +80,17 @@ queue.enqueue(
 
 # Keep main thread alive
 sleep
+```
+
+### ☠️ Dead Letter Queue (Handling Permanent Failures)
+
+When a task fails repeatedly and exhausts its `maxRetries`, the SnerdMQ daemon permanently moves it to the Dead Letter Queue. You can hook into this event to alert your team, update your database, or send a Slack message by registering a Max Retry Handler.
+
+```ruby
+# 5. Catch tasks that have permanently failed (Dead Letter Queue)
+queue.register_max_retry_handler('send_email') do |data|
+  puts "Email task failed after all retries! Data: #{data.inspect}"
+end
 ```
 
 ---

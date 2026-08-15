@@ -18,6 +18,7 @@ module Snerdmq
       end
 
       @handlers = {}
+      @max_retry_handlers = {}
       @handlers_mutex = Mutex.new
       
       @stdin_mutex = Mutex.new
@@ -40,6 +41,12 @@ module Snerdmq
           action: "register",
           task_type: task_type
         })
+      end
+    end
+
+    def register_max_retry_handler(task_type, &block)
+      @handlers_mutex.synchronize do
+        @max_retry_handlers[task_type] = block
       end
     end
 
@@ -169,7 +176,26 @@ module Snerdmq
               end
             end
           elsif msg["action"] == "max_retries_reached"
-            warn "[Snerd] Dead Letter Queue: Task #{msg['task_id']} (#{msg['task_type']}) permanently failed."
+            task_type = msg["task_type"]
+            handler = nil
+            @handlers_mutex.synchronize do
+              handler = @max_retry_handlers[task_type]
+            end
+
+            if handler
+              Thread.new do
+                begin
+                  raw_data = msg["task_data"]
+                  task_data = raw_data.is_a?(String) ? JSON.parse(raw_data) : raw_data
+                  Thread.current[:snerd_task_id] = msg["task_id"]
+                  handler.call(task_data)
+                rescue => e
+                  warn "[Snerd] Error in max retry handler for task #{msg['task_id']}: #{e.message}"
+                end
+              end
+            else
+              warn "[Snerd] Dead Letter Queue: Task #{msg['task_id']} (#{msg['task_type']}) permanently failed."
+            end
           end
         rescue JSON::ParserError
           # Ignore malformed stdout lines
