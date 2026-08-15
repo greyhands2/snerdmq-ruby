@@ -3,7 +3,7 @@ $LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
 
 Gem::Specification.new do |spec|
   spec.name          = "snerdmq"
-  spec.version       = "1.0.0"
+  spec.version       = "0.2.0"
   spec.authors       = ["Greyhands2"]
   spec.email         = ["developer@example.com"]
 
@@ -19,6 +19,10 @@ Gem::Specification.new do |spec|
   spec.executables   = ["snerdmq-install"]
   spec.require_paths = ["lib"]
 
+
+  spec.add_dependency "rack"
+  spec.add_dependency "puma"
+  spec.add_dependency "faye-websocket"
   spec.add_development_dependency "bundler", "~> 2.0"
   spec.add_development_dependency "rake", "~> 13.0"
   spec.add_development_dependency "minitest", "~> 5.0"

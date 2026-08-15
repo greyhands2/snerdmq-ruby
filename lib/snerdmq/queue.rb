@@ -26,6 +26,8 @@ module Snerdmq
       @listener_thread = nil
       @pending_enqueues = {}
       @pending_mutex = Mutex.new
+      @ws_clients = []
+      @ws_mutex = Mutex.new
     end
 
     def register_handler(task_type, &block)
@@ -160,6 +162,12 @@ module Snerdmq
             else
               warn "[Snerd] Error from engine: #{msg['message']}"
             end
+          elsif msg["action"] == "progress"
+            @ws_mutex.synchronize do
+              @ws_clients.each do |ws|
+                ws.send(msg.to_json)
+              end
+            end
           elsif msg["action"] == "max_retries_reached"
             warn "[Snerd] Dead Letter Queue: Task #{msg['task_id']} (#{msg['task_type']}) permanently failed."
           end
@@ -194,6 +202,7 @@ module Snerdmq
       end
 
       begin
+        Thread.current[:snerd_task_id] = task_id
         handler.call(task_data)
         send_message({
           action: "result",
@@ -209,5 +218,108 @@ module Snerdmq
         })
       end
     end
+
+    def yield_progress(data)
+      task_id = Thread.current[:snerd_task_id]
+      raise "[Snerd] yield_progress must be called within a task handler context." unless task_id
+      send_message({ action: "progress", task_id: task_id, data: data })
+    end
+
+    def start_dashboard(port: 8080)
+      require 'rack'
+      require 'faye/websocket'
+      require 'json'
+      
+      app = lambda do |env|
+        if Faye::WebSocket.websocket?(env)
+          ws = Faye::WebSocket.new(env)
+          @ws_mutex.synchronize { @ws_clients << ws }
+          ws.on(:close) do |event|
+            @ws_mutex.synchronize { @ws_clients.delete(ws) }
+          end
+          return ws.rack_response
+        end
+
+        req = Rack::Request.new(env)
+        cors_headers = {
+          'Access-Control-Allow-Origin' => '*',
+          'Access-Control-Allow-Methods' => 'GET, POST, OPTIONS'
+        }
+
+        if req.options?
+          return [204, cors_headers, []]
+        end
+
+        if req.get? && req.path == '/'
+          html_path = File.expand_path("../../static/index.html", __dir__)
+          if File.exist?(html_path)
+            return [200, { 'Content-Type' => 'text/html' }, [File.read(html_path)]]
+          else
+            return [404, {}, ['Dashboard UI not found']]
+          end
+        elsif req.get? && req.path == '/api/stats'
+          stats = { enqueued: 0, processed: 0, failed: 0 }
+          tasks_path = File.join(@storage_path || './.snerdata', 'tasks', 'tasks.log')
+          if File.exist?(tasks_path)
+            File.readlines(tasks_path).each do |line|
+              next if line.strip.empty?
+              begin
+                t = JSON.parse(line)
+                stats[:enqueued] += 1
+                if t['deletedAt']
+                  if t['lastJobError']
+                    stats[:failed] += 1
+                  else
+                    stats[:processed] += 1
+                  end
+                end
+              rescue
+              end
+            end
+          end
+          return [200, { 'Content-Type' => 'application/json' }.merge(cors_headers), [stats.to_json]]
+        elsif req.get? && req.path == '/api/tasks'
+          tasks_map = {}
+          tasks_path = File.join(@storage_path || './.snerdata', 'tasks', 'tasks.log')
+          if File.exist?(tasks_path)
+            File.readlines(tasks_path).each do |line|
+              next if line.strip.empty?
+              begin
+                t = JSON.parse(line)
+                tasks_map[t['taskId']] = t
+              rescue
+              end
+            end
+          end
+          
+          formatted = []
+          tasks_map.values.each do |t|
+            if t['deletedAt']
+              status = t['lastJobError'] ? 'failed' : 'completed'
+            else
+              status = t['lastJobError'] ? 'failed' : 'queued'
+            end
+            formatted << {
+              id: t['taskId'],
+              type: t['taskType'],
+              status: status,
+              progress: 0,
+              retryCount: t['retryCount'] || 0,
+              maxRetries: t['maxRetries'] || 3,
+              retryAfterTime: t['retryAfterTime']
+            }
+          end
+          return [200, { 'Content-Type' => 'application/json' }.merge(cors_headers), [formatted.first(50).to_json]]
+        end
+
+        [404, {}, []]
+      end
+
+      Thread.new do
+        puts "[Snerd] Dashboard running on http://localhost:#{port}"
+        Rack::Handler::Puma.run(app, Port: port, Silent: true)
+      end
+    end
+
   end
 end
