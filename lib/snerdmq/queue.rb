@@ -1,5 +1,6 @@
 require 'json'
 require 'thread'
+require 'timeout'
 
 module Snerdmq
   class SnerdQueue
@@ -72,7 +73,7 @@ module Snerdmq
       end
     end
 
-    def enqueue(task_id:, task_type:, data:, max_retries: 3, retry_after_hours: 0.0, rate_limit_group: nil, max_per_minute: nil, auto_dedupe: false, urgency_score: nil, execute_at: nil, cron: nil, webhook_url: nil)
+    def enqueue(task_id:, task_type:, data:, max_retries: 3, retry_after_hours: 0.0, rate_limit_group: nil, max_per_minute: nil, auto_dedupe: false, urgency_score: nil, execute_at: nil, cron: nil, webhook_url: nil, max_execution_seconds: nil)
       raise "[Snerd] Cannot enqueue task: Queue is not running. Call start_listening first." if @io.nil? || @shutting_down
       
       payload = {
@@ -94,6 +95,7 @@ module Snerdmq
       end
       payload[:cron] = cron if cron
       payload[:webhook_url] = webhook_url if webhook_url
+      payload[:max_execution_seconds] = max_execution_seconds if max_execution_seconds
 
       cond = ConditionVariable.new
       result = nil
@@ -214,6 +216,7 @@ module Snerdmq
     def handle_execute(msg)
       task_id = msg["task_id"]
       task_type = msg["task_type"]
+      max_execution_seconds = msg["max_execution_seconds"]
       
       raw_data = msg["task_data"]
       task_data = raw_data.is_a?(String) ? JSON.parse(raw_data) : raw_data
@@ -235,11 +238,24 @@ module Snerdmq
 
       begin
         Thread.current[:snerd_task_id] = task_id
-        handler.call(task_data)
+        if max_execution_seconds
+          Timeout.timeout(max_execution_seconds) do
+            handler.call(task_data)
+          end
+        else
+          handler.call(task_data)
+        end
         send_message({
           action: "result",
           task_id: task_id,
           status: "success"
+        })
+      rescue Timeout::Error
+        send_message({
+          action: "result",
+          task_id: task_id,
+          status: "error",
+          error_msg: "Task execution timed out after #{max_execution_seconds} seconds"
         })
       rescue => e
         send_message({

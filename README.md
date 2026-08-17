@@ -26,6 +26,10 @@ To power complex AI workflows, tasks can now be configured with advanced orchest
 * **`execute_at` (`String` | `Time`)**: A timestamp of when the job should be executed in the future.
 * **`cron` (`String`)**: A cron expression (e.g. `"0 * * * *"`) for recurring jobs. Shorthands like `"2h"` or `"10m"` are also supported.
 * **`webhook_url` (`String`)**: By providing a webhook URL, SnerdMQ will completely bypass your local Ruby blocks and dispatch the task payload via an HTTP POST request directly to the specified URL.
+* **`max_execution_seconds` (`Integer`)**: Optional hard timeout in seconds. If execution takes longer, it's marked as failed.
+
+### Note on Hard Timeouts (`max_execution_seconds`)
+When `max_execution_seconds` is provided, the Ruby SDK wraps the execution of your handler in a `Timeout.timeout` block. If the task takes longer than the timeout, a `Timeout::Error` is raised and the execution will be marked as failed. The background Rust daemon also enforces this timeout at the IPC level.
 
 ### 🌐 HTTP Webhooks (Serverless Execution)
 You can configure a task to execute externally via an HTTP POST request. By setting a `webhook_url`, the internal background processor will skip any registered handlers (`queue.register_handler`) and directly invoke the HTTP endpoint.
@@ -90,8 +94,9 @@ queue.enqueue(
   max_per_minute: 100,
   auto_dedupe: true,
   urgency_score: 0.99,
-  cron: "1h", # Runs every 1 hour!
-  webhook_url: "https://api.example.com/webhook" # Execute via HTTP instead of local handlers
+  cron: "1h",
+  webhook_url: "https://api.example.com/webhook",
+  max_execution_seconds: 300
 )
 
 # Keep main thread alive
