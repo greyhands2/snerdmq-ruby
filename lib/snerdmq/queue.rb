@@ -1,6 +1,7 @@
 require 'json'
 require 'thread'
 require 'timeout'
+require 'time'
 
 module Snerdmq
   class SnerdQueue
@@ -134,18 +135,6 @@ module Snerdmq
       @io.close if @io && !@io.closed?
     end
 
-    private
-
-    def send_message(msg)
-      @stdin_mutex.synchronize do
-        return if @shutting_down || @io.nil? || @io.closed?
-        @io.puts(msg.to_json)
-        @io.flush
-      end
-    rescue Errno::EPIPE
-      # Broken pipe if the daemon died unexpectedly
-    end
-
     def listen_to_stdout
       @io.each_line do |line|
         next if line.strip.empty?
@@ -178,6 +167,9 @@ module Snerdmq
               warn "[Snerd] Error from engine: #{msg['message']}"
             end
           elsif msg["action"] == "progress"
+            # Persist progress events so the dashboard (which falls back to
+            # HTTP polling in Ruby) can display them in the Progress Stream.
+            append_progress_event(msg)
             @ws_mutex.synchronize do
               @ws_clients.each do |ws|
                 ws.send(msg.to_json)
@@ -275,6 +267,7 @@ module Snerdmq
 
     def start_dashboard(port: 8080)
       require 'rack'
+      require 'puma'
       require 'faye/websocket'
       require 'json'
       
@@ -305,23 +298,40 @@ module Snerdmq
           else
             return [404, {}, ['Dashboard UI not found']]
           end
+        elsif req.get? && req.path == '/api/progress'
+          events = []
+          progress_path = File.join(@storage_path || './.snerdata', 'progress_events.log')
+          if File.exist?(progress_path)
+            File.readlines(progress_path).last(100).each do |line|
+              begin
+                ev = JSON.parse(line)
+                events << ev if ev.is_a?(Hash) && ev['ts']
+              rescue
+              end
+            end
+          end
+          return [200, { 'Content-Type' => 'application/json' }.merge(cors_headers), [events.to_json]]
         elsif req.get? && req.path == '/api/stats'
           stats = { enqueued: 0, processed: 0, failed: 0 }
+          tasks_map = {}
           tasks_path = File.join(@storage_path || './.snerdata', 'tasks', 'tasks.log')
           if File.exist?(tasks_path)
             File.readlines(tasks_path).each do |line|
               next if line.strip.empty?
               begin
                 t = JSON.parse(line)
-                stats[:enqueued] += 1
-                if t['deletedAt']
-                  if t['lastJobError']
-                    stats[:failed] += 1
-                  else
-                    stats[:processed] += 1
-                  end
-                end
+                tasks_map[t['taskId']] = t if t['taskId']
               rescue
+              end
+            end
+          end
+          tasks_map.values.each do |t|
+            stats[:enqueued] += 1
+            if t['deletedAt']
+              if t['LastJobError']
+                stats[:failed] += 1
+              else
+                stats[:processed] += 1
               end
             end
           end
@@ -343,9 +353,23 @@ module Snerdmq
           formatted = []
           tasks_map.values.each do |t|
             if t['deletedAt']
-              status = t['lastJobError'] ? 'failed' : 'completed'
+              if t['LastJobError'] && (t['retryCount'] || 0) >= (t['maxRetries'] || 3)
+                status = 'dead_letter'
+              elsif t['LastJobError']
+                status = 'failed'
+              else
+                status = 'completed'
+              end
+            elsif t['LastJobError']
+              status = 'failed'
             else
-              status = t['lastJobError'] ? 'failed' : 'queued'
+              status = 'queued'
+              if t['executeAt']
+                begin
+                  status = 'active' if Time.parse(t['executeAt']) <= Time.now
+                rescue
+                end
+              end
             end
             formatted << {
               id: t['taskId'],
@@ -354,7 +378,10 @@ module Snerdmq
               progress: 0,
               retryCount: t['retryCount'] || 0,
               maxRetries: t['maxRetries'] || 3,
-              retryAfterTime: t['retryAfterTime']
+              retryAfterTime: t['retryAfterTime'],
+              cronExpression: t['cronExpression'],
+              webhookUrl: t['webhookUrl'],
+              maxExecutionSeconds: t['maxExecutionSeconds']
             }
           end
           return [200, { 'Content-Type' => 'application/json' }.merge(cors_headers), [formatted.first(50).to_json]]
@@ -365,9 +392,39 @@ module Snerdmq
 
       Thread.new do
         puts "[Snerd] Dashboard running on http://localhost:#{port}"
-        Rack::Handler::Puma.run(app, Port: port, Silent: true)
+        server = Puma::Server.new(app)
+        server.add_tcp_listener('0.0.0.0', port)
+        server.run
       end
     end
 
+    private
+
+    def append_progress_event(msg)
+      dir = @storage_path || './.snerdata'
+      return unless File.directory?(dir)
+      path = File.join(dir, 'progress_events.log')
+
+      event = { ts: Time.now.to_f, task_id: msg['task_id'], data: msg['data'] }.to_json
+      File.open(path, 'a') { |f| f.puts(event) }
+
+      # Keep the file bounded: retain only the most recent events
+      if File.size(path) > 512 * 1024
+        lines = File.readlines(path).map(&:strip).reject(&:empty?)
+        File.write(path, lines.last(200).join("\n") + "\n")
+      end
+    rescue
+      # Never break the listener loop over progress persistence
+    end
+
+    def send_message(msg)
+      @stdin_mutex.synchronize do
+        return if @shutting_down || @io.nil? || @io.closed?
+        @io.puts(msg.to_json)
+        @io.flush
+      end
+    rescue Errno::EPIPE
+      # Broken pipe if the daemon died unexpectedly
+    end
   end
 end
