@@ -9,7 +9,7 @@ Gem::Specification.new do |spec|
 
   spec.summary       = "A zero-config, persistent background job queue for Ruby."
   spec.description   = "The official Ruby SDK for the SnerdMQ Rust daemon. Execute robust, lightning-fast background jobs without Redis."
-  spec.homepage      = "https://github.com/greyhands2/snerdmq-ruby"
+  spec.homepage      = "https://github.com/speed-nerd/snerdmq-ruby"
   spec.license       = "MIT"
 
   spec.files         = Dir.chdir(File.expand_path(__dir__)) do
