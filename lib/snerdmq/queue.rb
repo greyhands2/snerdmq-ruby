@@ -423,8 +423,8 @@ module Snerdmq
         @io.puts(msg.to_json)
         @io.flush
       end
-    rescue Errno::EPIPE
-      # Broken pipe if the daemon died unexpectedly
+    rescue Errno::EPIPE, Errno::EIO, IOError
+      # Broken pipe / IO error if the daemon died unexpectedly
     end
   end
 end
