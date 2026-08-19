@@ -1,6 +1,6 @@
 <div align="center">
   <img src="./assets/Designer-9.png" height="120" alt="SnerdMQ Ruby Logo" />
-  <h1>💎 SnerdMQ Ruby SDK v0.3.2</h1>
+  <h1>💎 SnerdMQ Ruby SDK v0.3.3</h1>
   <p>A zero-config, C-speed background job queue for Ruby. Ditch Redis and Sidekiq for lightweight, persistent background jobs.</p>
 
   [![Gem Version](https://badge.fury.io/rb/snerdmq.svg)](https://badge.fury.io/rb/snerdmq)
@@ -9,7 +9,7 @@
 
 This is the official Ruby SDK wrapper for **SnerdMQ**. It handles all JSON-RPC communication and `IO.popen` orchestration so you can write lightning-fast background jobs without managing any external databases like Redis or Postgres.
 
-## ✨ v0.3.2 AI Features
+## ✨ v0.3.3 AI Features
 - **Smart API Rate-Limiting**: Natively tracks `rate_limit_group` execution velocity to prevent 429 "Too Many Requests" API errors.
 - **Payload-Hashing Deduplication**: Automatically computes cryptographic hashes to drop duplicate tasks instantly.
 - **Dynamic Float Prioritization**: A native Binary Max-Heap bypasses standard FIFO rules for high urgency tasks.
@@ -18,7 +18,7 @@ This is the official Ruby SDK wrapper for **SnerdMQ**. It handles all JSON-RPC c
 - **Zero Rust Required**: Our gem installation script automatically downloads the pre-compiled C-speed Rust binary for your OS.
 - **Thread Safe**: Uses native Ruby `Thread`s and `Mutex` locks to orchestrate I/O without blocking your main event loop.
 
-### ⚙️ Advanced Task Configuration (v0.3.2)
+### ⚙️ Advanced Task Configuration (v0.3.3)
 To power complex AI workflows, tasks can now be configured with advanced orchestration parameters:
 
 * **`auto_dedupe` (`true/false`)**: If set to `true`, the daemon computes a cryptographic hash of the `task_type` and `data`. If an identical payload is currently sitting in the queue pending execution, this new task is silently dropped. Excellent for preventing duplicate generative AI requests from trigger-happy users!
@@ -167,18 +167,77 @@ end
 
 ---
 
-## 🌍 Advanced: Distributed Scaling
+## 🧩 Queue Topology: One Queue or Many?
 
-By default, the SDK spins up the Rust daemon which writes the queue to a local file (`.snerdata/tasks/tasks.log`). 
+### ✅ Recommended: one queue, all job types (singleton)
 
-If you have multiple Ruby microservices (or Rails instances) running behind a load balancer and want them to share the exact same queue, simply mount a **Shared Network Drive** (like AWS EFS or NFS) to all of your servers and pass the shared path:
+Each `Snerdmq::SnerdQueue` client spawns its own Rust daemon and **exclusively owns** its storage directory (`.snerdata` by default). The recommended pattern is **one client per application process**: register every job type on it and serve a single shared dashboard:
 
 ```ruby
 require 'snerdmq'
 
-# All of your Ruby servers point to the exact same shared file!
-# SnerdMQ's native OS file-locking guarantees zero data corruption.
-queue = Snerdmq::SnerdQueue.new(storage_path: "/mnt/aws-efs-shared-drive/snerd_tasks.log")
+# ONE queue client for the whole app
+queue = Snerdmq::SnerdQueue.new
+
+# Job type #1: image processing
+queue.register_handler("process_image") do |data|
+  puts "Processing image: #{data['image_id']}"
+end
+
+# Job type #2: OTP emails — same queue, same daemon
+queue.register_handler("send_otp_email") do |data|
+  puts "Sending OTP to: #{data['to']}"
+end
+
+queue.start_listening
+
+# Both job types flow through the exact same queue
+queue.enqueue(task_id: "img-1", task_type: "process_image", data: { "image_id" => "abc123" }, max_retries: 3, retry_after_hours: 0.5)
+queue.enqueue(task_id: "otp-1", task_type: "send_otp_email", data: { "to" => "john@wick.com" }, max_retries: 3, retry_after_hours: 0.5)
+
+# ONE dashboard shows every job type
+queue.start_dashboard(port: 8080)
 ```
+
+All job types share everything: the same persistent job log, retry/DLQ pipeline, rate-limit state, stats — and one dashboard at `http://localhost:8080` showing all of them.
+
+### 🚫 Same storage twice = fails fast
+
+The daemon takes an **exclusive OS-level lock** on its storage directory at startup. A second client on the same storage fails instead of silently double-executing your jobs:
+
+```ruby
+first = Snerdmq::SnerdQueue.new   # ✅ owns .snerdata
+second = Snerdmq::SnerdQueue.new  # ❌ daemon refuses to start:
+# "Another daemon is already running on storage '.snerdata'"
+```
+
+This applies across processes too — with **Puma/Unicorn clustered workers, every worker is a separate process** that spawns its own daemon, so each worker needs its own `storage_path` (or run a single dedicated worker process for jobs).
+
+### 🔀 Need multiple queues? Give each one its own storage
+
+```ruby
+images = Snerdmq::SnerdQueue.new(storage_path: ".snerdata-images")
+emails = Snerdmq::SnerdQueue.new(storage_path: ".snerdata-emails")
+
+images.start_dashboard(port: 8080) # separate dashboards, so separate ports
+emails.start_dashboard(port: 8081)
+```
+
+Now you have two fully independent engines: separate job logs, separate rate-limit state, separate dashboards. Only split when you actually need isolation (different teams, different retention, independent monitoring) — otherwise the singleton is simpler and recommended.
+
+---
+
+## 🌍 Advanced: Distributed Scaling
+
+Because the daemon exclusively locks its storage directory, scaling horizontally means **one queue per server**, each with its own storage. Your load balancer routes requests across servers, and every server processes the jobs it enqueued:
+
+```ruby
+require 'snerdmq'
+
+# Each server runs its own daemon on its own storage dir (local disk works fine)
+queue = Snerdmq::SnerdQueue.new(storage_path: "/var/data/snerd") # per-server storage
+```
+
+A shared network drive (AWS EFS or NFS) is still a good home for that storage when a single instance needs durable state — e.g. a container that restarts but must keep its queue. Native OS file locking (`flock`) keeps writes safe — no Redis required.
 
 *Built with ❤️ for John Wick tier engineering.*
